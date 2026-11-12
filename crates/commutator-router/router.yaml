@@ -1,0 +1,401 @@
+version: v0.1
+
+# Solo Router: a semantic decision layer for robots.
+# Every request flows through four steps:
+#   signals   -> what is being asked, by which robot, under which constraints
+#   decisions -> which policy family should handle it (first match by priority)
+#   algorithms-> which concrete model within that family, given latency/location/safety
+#   backends  -> where the chosen model runs (onboard, edge, cloud, browser)
+
+listener:
+  address: 0.0.0.0
+  port: 8899
+  # When true, /v1/chat/completions and /v1/actions return the routing decision
+  # without calling the selected backend. Handy for testing on a laptop.
+  dry_run: true
+
+signals:
+  intent:
+    # Keyword lexicon per intent. Whole-word/phrase matches on the lowercased
+    # instruction; the highest score wins, ties go to the earlier intent.
+    manipulation: [pick, pick up, place, put, grasp, grab, hold, release, fold, pour, open, close,
+                   insert, stack, wipe, push, pull, twist, screw, unscrew, hand me, lift, drop,
+                   sort, peg, drawer, cup, towel, block, cube, gripper]
+    navigation: [go to, navigate, move to, drive, walk, follow, dock, return to, explore, patrol,
+                 map, turn left, turn right, come here, go back, waypoint, hallway, room, aisle]
+    perception: [what do you see, describe, detect, count, inspect, identify, find, where is,
+                 look at, read the, recognize, check if, is there, scan, gauge, label]
+    planning: [plan, steps, sequence, clean the, set the table, organize, tidy, prepare, cook,
+               make me, assemble, unload, load the dishwasher, do the laundry, then, after that]
+    diagnostics: [error, fault, joint, torque, overheating, overheat, calibrate, calibration,
+                  battery, log, logs, motor, diagnose, diagnostic, firmware, encoder, status]
+    conversation: [hello, hi, explain, why, how are you, tell me, what can you do, who are you,
+                   thanks, thank you]
+  horizon:
+    # Instructions with at least this many sequencing markers ("then", "after that", "finally", commas)
+    # or this many words are treated as long-horizon tasks that need a planner.
+    long_markers: 2
+    long_words: 24
+    markers: [then, after that, afterwards, next, finally, and then]
+  safety:
+    critical_patterns:
+      - '^\s*(stop|halt|freeze|abort)\s*[!.]*\s*$'
+      - '\bemergency\b'
+      - '\be-?stop\b'
+      - '\bstop (now|immediately|moving|everything)\b'
+    hazard_words: [knife, blade, scissors, hot, boiling, stove, oven, chemical, bleach, glass,
+                   child, baby, kid, fire, sharp, needle, person, someone, face]
+  latency:
+    realtime_ms: 50       # tighter than this: only onboard reactive policies
+    interactive_ms: 500   # tighter than this: no cloud round trips
+  energy:
+    low_battery_pct: 20
+
+# Hosted model APIs you bring your own key for (BYOK). Cloud models name one with
+# `provider:` and inherit its base_url, api_format and api_key_env. A provider's models
+# are only routable when the request enables it: `providers: [...]` on the request, or,
+# in proxy mode, every provider whose key the server holds. Model IDs follow
+# OpenRouter's provider/model convention.
+providers:
+  openai:
+    label: OpenAI
+    base_url: https://api.openai.com/v1
+    api_format: openai
+    api_key_env: OPENAI_API_KEY
+    console_url: https://platform.openai.com/api-keys
+  anthropic:
+    label: Anthropic (Claude)
+    base_url: https://api.anthropic.com/v1
+    api_format: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    console_url: https://console.anthropic.com/settings/keys
+  nebius:
+    label: Nebius Token Factory
+    base_url: https://api.tokenfactory.nebius.com/v1
+    api_format: openai
+    api_key_env: NEBIUS_API_KEY
+    console_url: https://tokenfactory.nebius.com
+
+# Specific robots inherit the policies trained for their embodiment family.
+embodiment_families:
+  so101: arm
+  so100: arm
+  koch: arm
+  piper: arm
+  aloha: bimanual
+  lekiwi: mobile_manipulator
+  unitree_g1: humanoid
+  unitree_go2: quadruped
+
+# The default model set, grouped by role:
+#   perception -> see:   find and describe what is in front of the robot
+#   reasoning  -> think: plan, explain, diagnose
+#   action     -> move:  policies that output joint or base commands
+#   safety     -> stop:  the deterministic fail-safe every route ends in
+# Latency and quality numbers are illustrative. Measure your own hardware.
+models:
+  # ---------------- perception ----------------
+  - name: florence-2-base
+    role: perception
+    kind: detector
+    location: onboard
+    p50_latency_ms: 70
+    quality: 0.60
+    power_w: 12
+    embodiments: ["*"]
+    requires: [rgb]
+    base_url: http://127.0.0.1:8201
+    description: 0.23B open-vocabulary detector; finds and boxes objects by name.
+
+  - name: smolvlm2-2.2b
+    role: perception
+    kind: vlm
+    location: onboard
+    p50_latency_ms: 260
+    quality: 0.64
+    power_w: 15
+    embodiments: ["*"]
+    requires: [rgb]
+    base_url: http://127.0.0.1:8202/v1
+    api_format: openai
+    description: Small VLM that answers questions about the scene without a network.
+
+  - name: qwen2.5-vl-7b
+    role: perception
+    kind: vlm
+    location: edge
+    p50_latency_ms: 380
+    quality: 0.76
+    cost_per_1k: 0.05
+    embodiments: ["*"]
+    requires: [rgb]
+    base_url: http://edge.local:8000/v1
+    api_format: openai
+    description: Open VLM on the edge box for grounding, counting and reading gauges.
+
+  - name: florence-2-base-web
+    role: perception
+    kind: detector
+    location: browser
+    p50_latency_ms: 650
+    quality: 0.60
+    embodiments: ["*"]
+    requires: [rgb]
+    runtimes: [webgpu, wasm]
+    onnx:
+      hf_id: onnx-community/Florence-2-base-ft
+      task: "<CAPTION_TO_PHRASE_GROUNDING>"
+      dtype:
+        webgpu: { embed_tokens: fp16, vision_encoder: fp16, encoder_model: q4, decoder_model_merged: q4 }
+        wasm: { embed_tokens: fp32, vision_encoder: fp32, encoder_model: q4, decoder_model_merged: q4 }
+    description: Florence-2 as ONNX, running in the browser on WebGPU (WASM fallback).
+
+  # ---------------- reasoning ----------------
+  - name: smollm2-1.7b
+    role: reasoning
+    kind: llm
+    location: onboard
+    p50_latency_ms: 140
+    quality: 0.50
+    power_w: 8
+    embodiments: ["*"]
+    base_url: http://127.0.0.1:8106/v1
+    api_format: openai
+    description: Small language model for chat, status and log triage on the robot.
+
+  - name: qwen3-8b
+    role: reasoning
+    kind: planner
+    location: edge
+    p50_latency_ms: 900
+    quality: 0.72
+    cost_per_1k: 0.08
+    embodiments: ["*"]
+    base_url: http://edge.local:8001/v1
+    api_format: openai
+    description: Offline-capable task planner that breaks instructions into skills.
+
+  - name: anthropic/claude-sonnet-5-5
+    provider: anthropic
+    role: reasoning
+    kind: planner
+    location: cloud
+    p50_latency_ms: 2400
+    quality: 0.95
+    cost_per_1k: 4.0
+    embodiments: ["*"]
+    safety_tier: 2
+    description: Frontier cloud model for long-horizon, open-ended planning and scene questions.
+
+  - name: openai/gpt-5.5
+    provider: openai
+    role: reasoning
+    kind: planner
+    location: cloud
+    p50_latency_ms: 2400
+    quality: 0.93
+    cost_per_1k: 3.0
+    embodiments: ["*"]
+    safety_tier: 2
+    description: OpenAI's frontier model for planning, tool use and image questions.
+
+  - name: nebius/gpt-oss-120b
+    provider: nebius
+    upstream_model: openai/gpt-oss-120b
+    role: reasoning
+    kind: planner
+    location: cloud
+    p50_latency_ms: 1500
+    quality: 0.83
+    cost_per_1k: 0.4
+    embodiments: ["*"]
+    safety_tier: 2
+    description: Open-weight 120B reasoning model hosted on Nebius Token Factory. Fast and cheap.
+
+  - name: qwen2.5-0.5b-web
+    role: reasoning
+    kind: llm
+    location: browser
+    p50_latency_ms: 900
+    quality: 0.45
+    embodiments: ["*"]
+    runtimes: [webgpu, wasm]
+    onnx:
+      hf_id: onnx-community/Qwen2.5-0.5B-Instruct
+      task: text-generation
+      dtype: { webgpu: q4f16, wasm: q4 }
+    description: Qwen2.5-0.5B as ONNX, planning skills in the browser on WebGPU.
+
+  # ---------------- action ----------------
+  - name: act-so101
+    role: action
+    kind: policy
+    location: onboard
+    p50_latency_ms: 12
+    max_hz: 50
+    action_chunk: 100
+    quality: 0.58
+    power_w: 6
+    embodiments: [so101, so100]
+    requires: [rgb]
+    base_url: http://127.0.0.1:8100
+    description: LeRobot ACT policy trained on SO-101 demonstrations. Tiny, fast, task-specific.
+
+  - name: smolvla-450m
+    role: action
+    kind: vla
+    location: onboard
+    p50_latency_ms: 28
+    max_hz: 30
+    action_chunk: 50
+    quality: 0.62
+    power_w: 15
+    embodiments: [arm, bimanual]
+    requires: [rgb]
+    base_url: http://127.0.0.1:8101
+    description: Compact vision-language-action policy that fits on a Jetson-class board.
+
+  - name: pi0-3b
+    role: action
+    kind: vla
+    location: edge
+    p50_latency_ms: 45
+    max_hz: 50
+    action_chunk: 50
+    quality: 0.82
+    cost_per_1k: 0.02
+    embodiments: [arm, bimanual, mobile_manipulator]
+    requires: [rgb]
+    safety_tier: 2
+    base_url: http://edge.local:8102
+    description: Flow-matching VLA with action chunking for dexterous manipulation.
+
+  - name: openvla-7b
+    role: action
+    kind: vla
+    location: edge
+    p50_latency_ms: 170
+    max_hz: 6
+    quality: 0.70
+    cost_per_1k: 0.03
+    embodiments: [arm]
+    requires: [rgb]
+    base_url: http://edge.local:8103
+    description: Open 7B VLA; strong generalization, one action per call.
+
+  - name: gr00t-n1.5-3b
+    role: action
+    kind: vla
+    location: edge
+    p50_latency_ms: 40
+    max_hz: 30
+    action_chunk: 16
+    quality: 0.80
+    cost_per_1k: 0.02
+    embodiments: [humanoid, bimanual]
+    requires: [rgb]
+    safety_tier: 2
+    base_url: http://edge.local:8104
+    description: Humanoid foundation policy for whole-body and bimanual tasks.
+
+  - name: nav-policy-onboard
+    role: action
+    kind: nav
+    location: onboard
+    p50_latency_ms: 18
+    max_hz: 50
+    quality: 0.66
+    power_w: 10
+    embodiments: [mobile_manipulator, amr, quadruped, humanoid, drone]
+    safety_tier: 2
+    base_url: http://127.0.0.1:8105
+    description: Goal-conditioned visual navigation policy running on the robot.
+
+  - name: so101-ik-web
+    role: action
+    kind: controller
+    location: browser
+    p50_latency_ms: 1
+    max_hz: 1000
+    quality: 0.35
+    embodiments: [so101]
+    description: Scripted inverse-kinematics skill executor for the simulated SO-101. Not a learned policy.
+
+  # ---------------- safety ----------------
+  - name: safety-controller
+    role: safety
+    kind: safety
+    location: onboard
+    p50_latency_ms: 2
+    max_hz: 1000
+    quality: 1.0
+    embodiments: ["*"]
+    safety_tier: 3
+    description: Deterministic stop / hold-position controller. Never a learned model.
+
+decisions:
+  - name: emergency_stop
+    priority: 1000
+    when: { safety: critical }
+    candidates: [safety-controller]
+    algorithm: static
+
+  - name: realtime_manipulation
+    priority: 300
+    when: { intent: manipulation, horizon: short }
+    candidates: [pi0-3b, gr00t-n1.5-3b, smolvla-450m, act-so101, openvla-7b, so101-ik-web]
+    algorithm: latency_aware
+
+  - name: navigation
+    priority: 290
+    when: { intent: navigation, horizon: short }
+    candidates: [nav-policy-onboard]
+    algorithm: latency_aware
+
+  - name: long_horizon_task
+    priority: 200
+    when: { any: [{ intent: planning }, { horizon: long }] }
+    candidates: [anthropic/claude-sonnet-5-5, openai/gpt-5.5, nebius/gpt-oss-120b, qwen3-8b, smollm2-1.7b,
+                 qwen2.5-0.5b-web]
+    algorithm: hybrid
+
+  - name: scene_understanding
+    priority: 150
+    when: { intent: perception }
+    candidates: [florence-2-base, smolvlm2-2.2b, qwen2.5-vl-7b, anthropic/claude-sonnet-5-5, openai/gpt-5.5,
+                 florence-2-base-web]
+    algorithm: hybrid
+
+  - name: diagnostics
+    priority: 120
+    when: { intent: diagnostics }
+    candidates: [smollm2-1.7b, qwen3-8b, anthropic/claude-sonnet-5-5, openai/gpt-5.5, nebius/gpt-oss-120b]
+    algorithm: hybrid
+    prefer: latency
+
+  - name: conversation
+    priority: 0
+    when: {}
+    candidates: [smollm2-1.7b, qwen3-8b, anthropic/claude-sonnet-5-5, openai/gpt-5.5, nebius/gpt-oss-120b]
+    algorithm: hybrid
+    prefer: latency
+
+# /v1/task and `solo-router task`: route one instruction through every stage.
+# `signals` fixes what the stage is for; `control_loop` keeps the control-rate
+# deadline (only the stage that moves the robot needs it).
+pipeline:
+  - stage: perceive
+    signals: { intent: perception, horizon: short }
+  - stage: reason
+    signals: { intent: planning }
+  - stage: act
+    signals: { intent: manipulation, horizon: short }
+    control_loop: true
+
+guardrails:
+  # Attached to any decision whose safety signal is "elevated".
+  elevated:
+    max_speed_mps: 0.25
+    max_force_n: 20
+    min_safety_tier: 2
+    require_confirmation: false

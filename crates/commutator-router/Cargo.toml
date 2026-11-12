@@ -1,0 +1,24 @@
+[package]
+name = "commutator-router"
+description = "Routing core of Commutator: turns a robot request into signals, picks a decision and ranks models by latency, location and safety. Ported from solo-router."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["robotics", "router", "llm", "vla", "physical-ai"]
+categories = ["science::robotics"]
+exclude = ["tests/"]
+
+[dependencies]
+fancy-regex = "0.20.2"
+indexmap = { version = "2.14.2", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_yaml_ng = "0.10.0"
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

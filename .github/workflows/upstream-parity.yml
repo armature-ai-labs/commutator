@@ -1,0 +1,30 @@
+name: Upstream parity
+
+# Weekly: regenerate the parity fixtures from solo-router's latest main and run the
+# parity test. A failure means solo-router changed behaviour; review and decide whether
+# to follow it. This never changes the committed fixtures.
+
+on:
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ddiddi/solo-router
+          path: solo-router
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      - run: python scripts/gen_parity_fixtures.py solo-router
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p commutator-router --test parity

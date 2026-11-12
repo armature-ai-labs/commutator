@@ -1,0 +1,32 @@
+[package]
+name = "commutator"
+description = "Commutator: an open-source AI gateway for robots. Routes each robot request to the right model, on the right compute, inside a safety envelope."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords = ["robotics", "gateway", "router", "vla", "physical-ai"]
+categories = ["science::robotics", "command-line-utilities"]
+
+[[bin]]
+name = "commutator"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8.9"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+commutator-router = { version = "0.0.1", path = "../commutator-router" }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "net"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[lints]
+workspace = true
