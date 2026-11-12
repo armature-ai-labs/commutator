@@ -301,7 +301,7 @@ impl RouterConfig {
                 prefer,
             });
         }
-        decisions.sort_by(|a, b| b.priority.cmp(&a.priority));
+        decisions.sort_by_key(|d| std::cmp::Reverse(d.priority));
 
         if !models.contains_key(FAILSAFE) {
             return Err(invalid(format!(
